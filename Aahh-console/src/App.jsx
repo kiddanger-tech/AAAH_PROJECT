@@ -5,9 +5,9 @@ const FONT_DISPLAY = "'Big Shoulders Text', sans-serif";
 const FONT_DATA = "'IBM Plex Mono', monospace";
 
 export default function AahhFieldConsole() {
-  const [config, setConfig] = useState({ backendUrl: '' });
+  const [config, setConfig] = useState({ url: '', anonKey: '' });
   const [configOpen, setConfigOpen] = useState(true);
-  const [draft, setDraft] = useState({ backendUrl: '' });
+  const [draft, setDraft] = useState({ url: '', anonKey: '' });
 
   const [connected, setConnected] = useState(false);
   const [lastError, setLastError] = useState(null);
@@ -41,13 +41,18 @@ export default function AahhFieldConsole() {
   }, []);
 
   const fetchState = useCallback(async () => {
-    if (!config.backendUrl) return;
+    if (!config.url || !config.anonKey) return;
     try {
-      const res = await fetch(`${config.backendUrl}/state`);
+      const res = await fetch(`${config.url}/rest/v1/system_controls?id=eq.1`, {
+        headers: {
+          apikey: config.anonKey,
+          Authorization: `Bearer ${config.anonKey}`,
+        },
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const row = Array.isArray(data) ? data[0] : data;
-      if (!row) throw new Error('No state returned');
+      if (!row) throw new Error('No system_controls row returned');
 
       setConnected(true);
       setLastError(null);
@@ -76,9 +81,12 @@ export default function AahhFieldConsole() {
   }, [config, pushLog, notify]);
 
   const fetchClips = useCallback(async () => {
-    if (!config.backendUrl) return;
+    if (!config.url || !config.anonKey) return;
     try {
-      const res = await fetch(`${config.backendUrl}/clips`);
+      const res = await fetch(
+        `${config.url}/rest/v1/clips?order=created_at.desc&limit=10`,
+        { headers: { apikey: config.anonKey, Authorization: `Bearer ${config.anonKey}` } }
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setClips(data);
@@ -101,12 +109,17 @@ export default function AahhFieldConsole() {
   }, [polling, fetchState, fetchClips]);
 
   const startClip = async (durationSeconds) => {
-    if (!config.backendUrl) return;
+    if (!config.url || !config.anonKey) return;
     setRecordBusy(true);
     try {
-      const res = await fetch(`${config.backendUrl}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch(`${config.url}/rest/v1/system_controls?id=eq.1`, {
+        method: 'PATCH',
+        headers: {
+          apikey: config.anonKey,
+          Authorization: `Bearer ${config.anonKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
         body: JSON.stringify({ record_clip: true, record_duration_seconds: durationSeconds }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -124,10 +137,22 @@ export default function AahhFieldConsole() {
     setViewerIndex(0);
     setViewerLoading(true);
     try {
-      const prefix = clip.storage_prefix || clip.id;
-      const res = await fetch(`${config.backendUrl}/clips/${prefix}/frames`);
+      const res = await fetch(`${config.url}/storage/v1/object/list/field-clips`, {
+        method: 'POST',
+        headers: {
+          apikey: config.anonKey,
+          Authorization: `Bearer ${config.anonKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prefix: clip.storage_prefix || clip.id, limit: 1000 }),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const urls = await res.json();
+      const objects = await res.json();
+      const prefix = clip.storage_prefix || clip.id;
+      const urls = objects
+        .filter(o => o.name && o.name.endsWith('.jpg'))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(o => `${config.url}/storage/v1/object/public/field-clips/${prefix}/${o.name}`);
       setViewerFrames(urls);
     } catch (err) {
       pushLog('error', `Could not load clip frames: ${err.message}`);
@@ -152,11 +177,11 @@ export default function AahhFieldConsole() {
   };
 
   const startConnection = () => {
-    if (!draft.backendUrl) return;
-    setConfig({ backendUrl: draft.backendUrl.replace(/\/$/, '') });
+    if (!draft.url || !draft.anonKey) return;
+    setConfig({ url: draft.url.replace(/\/$/, ''), anonKey: draft.anonKey });
     setConfigOpen(false);
     setPolling(true);
-    pushLog('system', 'Connected to AAHH backend');
+    pushLog('system', 'Connected to Supabase project');
   };
 
   const requestNotifPermission = () => {
@@ -165,11 +190,16 @@ export default function AahhFieldConsole() {
   };
 
   const patchControl = async (field, value) => {
-    if (!config.backendUrl) return;
+    if (!config.url || !config.anonKey) return;
     try {
-      const res = await fetch(`${config.backendUrl}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch(`${config.url}/rest/v1/system_controls?id=eq.1`, {
+        method: 'PATCH',
+        headers: {
+          apikey: config.anonKey,
+          Authorization: `Bearer ${config.anonKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
         body: JSON.stringify({ [field]: value }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -224,22 +254,30 @@ export default function AahhFieldConsole() {
               <span style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 700, letterSpacing: 0.5 }}>
                 Connect your node
               </span>
-              {config.backendUrl && (
+              {config.url && (
                 <button style={styles.xBtn} onClick={() => setConfigOpen(false)} aria-label="Close">
                   <X size={18} color="#e9dcc8" />
                 </button>
               )}
             </div>
             <p style={styles.configHint}>
-              Point this console at your AAHH backend on Deno Deploy — it talks to Supabase on
-              your behalf, so no database key ever lives in this browser tab.
+              Point this console at the Supabase project your ESP32-CAM syncs with. Values stay in this
+              browser tab only — they clear on refresh, nothing is saved to a server.
             </p>
-            <label style={styles.label}>Backend URL</label>
+            <label style={styles.label}>Supabase project URL</label>
             <input
               style={styles.input}
-              placeholder="https://aahh-backend.deno.dev"
-              value={draft.backendUrl}
-              onChange={e => setDraft(d => ({ ...d, backendUrl: e.target.value }))}
+              placeholder="https://your-project-id.supabase.co"
+              value={draft.url}
+              onChange={e => setDraft(d => ({ ...d, url: e.target.value }))}
+            />
+            <label style={styles.label}>Anon public key</label>
+            <input
+              style={styles.input}
+              type="password"
+              placeholder="eyJhbGciOi..."
+              value={draft.anonKey}
+              onChange={e => setDraft(d => ({ ...d, anonKey: e.target.value }))}
             />
             <button style={styles.primaryBtn} onClick={startConnection}>
               <Wifi size={16} /> Connect
